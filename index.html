@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<title>Finger Gun Arcade</title>
+<style>
+:root{--bg:#07080d;--fg:#e8ecff;--a:#00f0ff;--b:#ff2d95}
+*{box-sizing:border-box;margin:0}
+html,body{height:100%;background:var(--bg);color:var(--fg);font-family:ui-monospace,Menlo,Consolas,monospace;overflow:hidden;touch-action:none;-webkit-user-select:none;user-select:none}
+canvas{position:fixed;inset:0;width:100%;height:100%}
+video{position:fixed;left:0;top:0;width:2px;height:2px;opacity:0;pointer-events:none}
+#ui{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;text-align:center;padding:24px;background:rgba(7,8,13,.82)}
+#ui:empty{display:none}
+h1{font-size:clamp(40px,12vw,72px);line-height:.95;color:var(--a);text-shadow:0 0 18px var(--a),0 0 40px var(--b)}
+p{opacity:.8;font-size:14px;max-width:320px;line-height:1.4}
+button,input{font:inherit;font-size:18px;padding:14px 26px;border-radius:10px;border:2px solid var(--a);background:transparent;color:var(--a);letter-spacing:2px;text-transform:uppercase}
+button:active{background:var(--a);color:#000}
+button.b{border-color:var(--b);color:var(--b)}
+input{width:120px;text-align:center;color:var(--fg);border-color:var(--b)}
+.row{display:flex;gap:10px}
+.big{font-size:34px;color:var(--y,#ffe14d)}
+</style></head><body>
+<canvas id="c"></canvas><video id="v" playsinline muted></video>
+<div id="ui"></div>
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+const $=id=>document.getElementById(id),cv=$('c'),cx=cv.getContext('2d'),vid=$('v');
+let W,H;
+function rs(){const d=Math.min(devicePixelRatio||1,2);W=innerWidth;H=innerHeight;cv.width=W*d;cv.height=H*d;cx.setTransform(d,0,0,d,0,0)}
+addEventListener('resize',rs);rs();
+
+const TY=[{e:'👾',r:.07,p:10,sp:.12},{e:'🛸',r:.045,p:25,sp:.28},{e:'💣',r:.06,p:-20,sp:.15}];
+const COL=['#00f0ff','#ff2d95'];
+let ph='menu',net=null,conn=null,me=0,tleft=60,T=[],S=[0,0],FX=[],fxOut=[],nid=1,spawn=1;
+let aim=[{x:.5,y:.5},{x:.5,y:.5}],hist=[],armed=false,hand=false,camOK=false,camTried=false,hl=null,lastVT=-1,flash=0,code='';
+let ac;
+
+/* ---------- audio ---------- */
+function beep(f=520,t=.12){try{const o=ac.createOscillator(),g=ac.createGain(),n=ac.currentTime;o.type='square';o.frequency.setValueAtTime(f*2,n);o.frequency.exponentialRampToValueAtTime(f/3,n+t);g.gain.setValueAtTime(.12,n);g.gain.exponentialRampToValueAtTime(.001,n+t);o.connect(g).connect(ac.destination);o.start();o.stop(n+t+.01)}catch{}}
+
+/* ---------- UI ---------- */
+function msg(t){const m=$('msg');if(m)m.textContent=t}
+function setPh(p){if(p!==ph){ph=p;ui()}}
+function ui(){
+  const u=$('ui');
+  if(ph==='play'){u.innerHTML='';return}
+  if(ph==='menu')u.innerHTML=`<h1>FINGER<br>GUN</h1><p>Point your finger-gun at the front camera. Drop your thumb to shoot. Prop your phone up!</p>
+  <button onclick="go('solo')">Solo</button><button class="b" onclick="go('host')">Host 1v1</button>
+  <div class="row"><input id="code" maxlength="4" placeholder="CODE" autocapitalize="characters"><button class="b" onclick="go('join')">Join</button></div><p id="msg"></p>`;
+  else if(ph==='lobby')u.innerHTML=me===0
+    ?`<h1>ROOM<br>${code}</h1><p>${conn?'Opponent connected!':'Share this code. Waiting for opponent…'}</p>${conn?'<button onclick="begin()">Start</button>':''}<button class="b" onclick="menu()">Back</button>`
+    :`<h1>JOINED</h1><p>Waiting for host to start…</p><button class="b" onclick="menu()">Leave</button>`;
+  else if(ph==='over'){
+    const solo=!conn&&me===0;let t,hi='';
+    if(solo){let b=0;try{b=+localStorage.fgaBest||0;if(S[0]>b){b=S[0];localStorage.fgaBest=b}}catch{}t=`<div class="big">${S[0]}</div>`;hi=`<p>Best: ${b}</p>`}
+    else t=`<div class="big">${S[0]===S[1]?'DRAW':(S[me]>S[1-me]?'YOU WIN':'YOU LOSE')}</div><p>P1 ${S[0]} — P2 ${S[1]}</p>`;
+    u.innerHTML=`<h1>TIME</h1>${t}${hi}${me===0?'<button onclick="begin()">Again</button>':'<p>Waiting for host…</p>'}<button class="b" onclick="menu()">Menu</button>`;
+  }
+}
+function menu(){try{net&&net.destroy()}catch{}net=conn=null;me=0;T=[];setPh('menu')}
+
+/* ---------- camera + hand tracking ---------- */
+async function cam(){
+  camTried=true;
+  try{
+    msg('Starting camera…');
+    vid.srcObject=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:640},height:{ideal:480}},audio:false});
+    await vid.play();
+    msg('Loading hand tracking…');
+    const V='https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14';
+    const m=await import(V+'/vision_bundle.mjs');
+    const fs=await m.FilesetResolver.forVisionTasks(V+'/wasm');
+    const mk=d=>m.HandLandmarker.createFromOptions(fs,{baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',delegate:d},runningMode:'VIDEO',numHands:1});
+    try{hl=await mk('GPU')}catch{hl=await mk('CPU')}
+    camOK=true;
+  }catch(e){camOK=false;msg('No camera/tracking. Tap the screen to aim & shoot instead.');await new Promise(r=>setTimeout(r,1800))}
+}
+const D=(l,a,b)=>Math.hypot(l[a].x-l[b].x,l[a].y-l[b].y);
+function track(now){
+  if(vid.readyState<2||vid.currentTime===lastVT)return;lastVT=vid.currentTime;
+  const l=hl.detectForVideo(vid,now).landmarks[0];
+  if(!l){hand=false;armed=false;return}
+  hand=true;
+  const s=D(l,0,9)||1e-3;
+  const pointing=D(l,8,0)>D(l,6,0)*1.1&&D(l,8,0)>1.4*s;
+  const curled=[[12,10],[16,14],[20,18]].every(([t,p])=>D(l,t,0)<D(l,p,0)*1.1);
+  if(!(pointing&&curled)){armed=false;return}
+  // map index tip to screen (mirrored, cover-fit)
+  const vw=vid.videoWidth,vh=vid.videoHeight,sc=Math.max(W/vw,H/vh),ox=(W-vw*sc)/2,oy=(H-vh*sc)/2;
+  const x=1-(ox+l[8].x*vw*sc)/W,y=(oy+l[8].y*vh*sc)/H,a=aim[me];
+  a.x+=(x-a.x)*.6;a.y+=(y-a.y)*.6;
+  hist.push({x:a.x,y:a.y});if(hist.length>4)hist.shift();
+  // thumb tip -> middle-finger knuckle: far = cocked, near = dropped
+  const th=D(l,4,9)/s;
+  if(th>.8)armed=true;
+  else if(armed&&th<.55){armed=false;fire(hist[0].x,hist[0].y)}
+}
+cv.addEventListener('pointerdown',e=>{
+  if(camOK||ph!=='play')return;
+  aim[me]={x:e.clientX/W,y:e.clientY/H};fire(aim[me].x,aim[me].y);
+});
+
+/* ---------- game core (host / solo is authoritative) ---------- */
+function fx(x,y,t,c){const f={x,y,t,c,life:1};FX.push(f);if(me===0&&conn)fxOut.push([x,y,t,c])}
+function fire(x,y){
+  if(ph!=='play')return;
+  flash=1;beep();
+  if(me===0)resolve(x,y,0);else if(conn&&conn.open)conn.send({k:'shot',x,y});
+}
+function resolve(x,y,who){
+  if(ph!=='play')return;
+  let b=null,bd=9;
+  for(const t of T){const d=Math.hypot(x-t.x,y-t.y);if(d<TY[t.k].r*1.6&&d<bd){b=t;bd=d}}
+  if(b){T=T.filter(q=>q!==b);const p=TY[b.k].p;S[who]+=p;fx(b.x,b.y,(p>0?'+':'')+p,p>0?COL[who]:'#ff4040');if(who===me)beep(p>0?900:120,.18)}
+  else fx(x,y,'·','#888');
+}
+function begin(){T=[];S=[0,0];tleft=60;spawn=1;setPh('play')}
+function hostTick(dt){
+  if(ph!=='play')return;
+  tleft-=dt;if(tleft<=0){tleft=0;setPh('over');return}
+  spawn-=dt;
+  if(spawn<=0){
+    spawn=.45+Math.random()*.6;
+    const r=Math.random(),k=r<.55?0:r<.8?1:2,dir=Math.random()<.5?1:-1,ty=TY[k];
+    T.push({id:nid++,k,x:dir>0?-.08:1.08,y:.15+Math.random()*.7,vx:dir*ty.sp*(.8+Math.random()*.5),vy:(Math.random()-.5)*.12});
+  }
+  mv(dt);
+}
+function mv(dt){for(const t of T){t.x+=t.vx*dt;t.y+=t.vy*dt;if(t.y<.08||t.y>.92)t.vy*=-1}T=T.filter(t=>t.x>-.12&&t.x<1.12)}
+
+/* ---------- networking (PeerJS / WebRTC, no server setup) ---------- */
+function onData(m){
+  if(m.k==='aim'){aim[1]=m}
+  else if(m.k==='shot'){resolve(m.x,m.y,1)}
+  else if(m.k==='st'){
+    T=m.T.map(a=>({id:a[0],x:a[1],y:a[2],vx:a[3],vy:a[4],k:a[5]}));S=m.S;tleft=m.t;aim[0]=m.a;
+    m.fx.forEach(f=>FX.push({x:f[0],y:f[1],t:f[2],c:f[3],life:1}));
+    setPh(m.ph);
+  }
+}
+function hostRoom(){
+  code=Math.random().toString(36).slice(2,6).toUpperCase();me=0;
+  net=new Peer('fga-'+code);
+  net.on('open',()=>{setPh('lobby');ui()});
+  net.on('connection',c=>{conn=c;c.on('open',ui);c.on('data',onData);c.on('close',()=>{conn=null;ph='lobby';ui()})});
+  net.on('error',e=>{if(e.type==='unavailable-id')hostRoom();else{msg('Network error: '+e.type)}});
+}
+function joinRoom(c){
+  me=1;net=new Peer();
+  net.on('open',()=>{conn=net.connect('fga-'+c.toUpperCase().trim());conn.on('open',()=>setPh('lobby'));conn.on('data',onData);conn.on('close',menu)});
+  net.on('error',e=>{menu();setTimeout(()=>msg(e.type==='peer-unavailable'?'Room not found':'Network error: '+e.type),50)});
+}
+setInterval(()=>{
+  if(!conn||!conn.open)return;
+  if(me===0){conn.send({k:'st',ph,t:tleft,S,a:aim[0],T:T.map(t=>[t.id,+t.x.toFixed(3),+t.y.toFixed(3),t.vx,t.vy,t.k]),fx:fxOut});fxOut=[]}
+  else conn.send({k:'aim',x:aim[1].x,y:aim[1].y});
+},66);
+
+async function go(kind){
+  try{ac=ac||new AudioContext();ac.resume()}catch{}
+  const c=kind==='join'?($('code').value||'').trim():'';
+  if(kind==='join'&&c.length<4){msg('Enter the 4-letter code');return}
+  if(!camTried)await cam();
+  if(kind==='solo'){net=conn=null;me=0;begin()}
+  else if(kind==='host')hostRoom();
+  else joinRoom(c);
+}
+
+/* ---------- render ---------- */
+function draw(){
+  cx.fillStyle='#07080d';cx.fillRect(0,0,W,H);
+  if(camOK&&vid.videoWidth){
+    const vw=vid.videoWidth,vh=vid.videoHeight,sc=Math.max(W/vw,H/vh);
+    cx.save();cx.translate(W,0);cx.scale(-1,1);cx.globalAlpha=.4;
+    cx.drawImage(vid,(W-vw*sc)/2,(H-vh*sc)/2,vw*sc,vh*sc);cx.restore();cx.globalAlpha=1;
+  }
+  cx.strokeStyle='rgba(0,240,255,.07)';cx.lineWidth=1;
+  for(let i=1;i<8;i++){cx.beginPath();cx.moveTo(W*i/8,0);cx.lineTo(W*i/8,H);cx.stroke()}
+  cx.textAlign='center';cx.textBaseline='middle';
+  for(const t of T){cx.font=(TY[t.k].r*Math.min(W,H)*2.4)+'px serif';cx.shadowColor=t.k===2?'#f33':'#0ff';cx.shadowBlur=16;cx.fillText(TY[t.k].e,t.x*W,t.y*H)}
+  cx.shadowBlur=0;
+  for(let i=0;i<2;i++){
+    if(i!==me&&!conn)continue;
+    const a=aim[i],x=a.x*W,y=a.y*H;
+    if(ph!=='play'&&!(i===me&&camOK))continue;
+    cx.strokeStyle=COL[i];cx.lineWidth=2.5;cx.shadowColor=COL[i];cx.shadowBlur=10;
+    cx.beginPath();cx.arc(x,y,22,0,7);cx.moveTo(x-34,y);cx.lineTo(x-10,y);cx.moveTo(x+10,y);cx.lineTo(x+34,y);cx.moveTo(x,y-34);cx.lineTo(x,y-10);cx.moveTo(x,y+10);cx.lineTo(x,y+34);cx.stroke();
+  }
+  cx.shadowBlur=0;
+  for(const f of FX){f.life-=.025;cx.globalAlpha=Math.max(f.life,0);cx.fillStyle=f.c;cx.font='bold 26px ui-monospace,monospace';cx.fillText(f.t,f.x*W,f.y*H-(1-f.life)*40)}
+  cx.globalAlpha=1;FX=FX.filter(f=>f.life>0);
+  if(flash>0){cx.fillStyle=`rgba(255,255,255,${flash*.18})`;cx.fillRect(0,0,W,H);flash-=.12}
+  if(ph==='play'){
+    const top='max(14px,env(safe-area-inset-top))';cx.font='bold 22px ui-monospace,monospace';const y=Math.max(30,+(0))+10;
+    cx.textAlign='left';cx.fillStyle=COL[0];cx.fillText((conn?'P1 ':'')+S[0],16,y+10);
+    if(conn){cx.textAlign='right';cx.fillStyle=COL[1];cx.fillText('P2 '+S[1],W-16,y+10)}
+    cx.textAlign='center';cx.fillStyle='#e8ecff';cx.fillText(Math.ceil(tleft),W/2,y+10);
+    cx.font='14px ui-monospace,monospace';
+    if(camOK){cx.fillStyle=armed?'#7dff7d':hand?'#ffe14d':'#ff6b6b';cx.fillText(armed?'● ARMED':hand?'make a finger gun 👉':'show your hand',W/2,H-40)}
+    else{cx.fillStyle='#aaa';cx.fillText('tap to shoot',W/2,H-40)}
+  }
+}
+let last=performance.now();
+function loop(now){
+  const dt=Math.min((now-last)/1000,.1);last=now;
+  if(camOK&&hl&&ph==='play')track(now);
+  if(me===0)hostTick(dt);else if(ph==='play')mv(dt);
+  draw();requestAnimationFrame(loop);
+}
+ui();requestAnimationFrame(loop);
+</script></body></html>
