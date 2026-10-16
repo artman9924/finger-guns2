@@ -43,7 +43,7 @@ function setPh(p){if(p!==ph){ph=p;ui()}}
 function ui(){
   const u=$('ui');
   if(ph==='play'){u.innerHTML='';return}
-  if(ph==='menu')u.innerHTML=`<h1>FINGER<br>GUN</h1><p>Point your finger-gun at the front camera. Drop your thumb to shoot. Prop your phone up!</p>
+  if(ph==='menu')u.innerHTML=`<h1>FINGER<br>GUN</h1><p>Aim your finger-gun straight at the front camera, thumb up. Drop your thumb to shoot. Tilt your finger to steer. Prop your phone up!</p>
   <button onclick="go('solo')">Solo</button><button class="b" onclick="go('host')">Host 1v1</button>
   <div class="row"><input id="code" maxlength="4" placeholder="CODE" autocapitalize="characters"><button class="b" onclick="go('join')">Join</button></div><p id="msg"></p>`;
   else if(ph==='lobby')u.innerHTML=me===0
@@ -74,25 +74,31 @@ async function cam(){
     camOK=true;
   }catch(e){camOK=false;msg('No camera/tracking. Tap the screen to aim & shoot instead.');await new Promise(r=>setTimeout(r,1800))}
 }
-const D=(l,a,b)=>Math.hypot(l[a].x-l[b].x,l[a].y-l[b].y);
+let AR=1.33,dbg='';
+const D=(l,a,b)=>Math.hypot((l[a].x-l[b].x)*AR,l[a].y-l[b].y);
+const D3=(l,a,b)=>Math.hypot((l[a].x-l[b].x)*AR,l[a].y-l[b].y,(l[a].z-l[b].z)*AR);
 function track(now){
   if(vid.readyState<2||vid.currentTime===lastVT)return;lastVT=vid.currentTime;
   const l=hl.detectForVideo(vid,now).landmarks[0];
   if(!l){hand=false;armed=false;return}
   hand=true;
-  const s=D(l,0,9)||1e-3;
-  const pointing=D(l,8,0)>D(l,6,0)*1.1&&D(l,8,0)>1.4*s;
-  const curled=[[12,10],[16,14],[20,18]].every(([t,p])=>D(l,t,0)<D(l,p,0)*1.1);
+  AR=vid.videoWidth/vid.videoHeight;
+  // Pose test in 3D, scaled by knuckle width: works when the finger points AT the camera (tip foreshortened)
+  const K=D3(l,5,17)||1e-3,K2=Math.max(D(l,5,17),1e-3);
+  const idx=D3(l,8,5),pointing=idx>.8*K&&idx>D3(l,12,9)*1.4;
+  const curled=[[12,9],[16,13],[20,17]].every(([t,m])=>D3(l,t,m)<.65*K);
+  dbg=`idx ${(idx/K).toFixed(2)} ${pointing?'P':'-'}${curled?'C':'-'}`;
   if(!(pointing&&curled)){armed=false;return}
-  // map index tip to screen (mirrored, cover-fit)
+  // Aim = fingertip position plus the finger's small tilt (amplified), mirrored, cover-fit
   const vw=vid.videoWidth,vh=vid.videoHeight,sc=Math.max(W/vw,H/vh),ox=(W-vw*sc)/2,oy=(H-vh*sc)/2;
-  const x=1-(ox+l[8].x*vw*sc)/W,y=(oy+l[8].y*vh*sc)/H,a=aim[me];
+  const gx=l[8].x+3*(l[8].x-l[5].x),gy=l[8].y+3*(l[8].y-l[5].y);
+  const x=Math.min(1,Math.max(0,1-(ox+gx*vw*sc)/W)),y=Math.min(1,Math.max(0,(oy+gy*vh*sc)/H)),a=aim[me];
   a.x+=(x-a.x)*.6;a.y+=(y-a.y)*.6;
   hist.push({x:a.x,y:a.y});if(hist.length>4)hist.shift();
-  // thumb tip -> middle-finger knuckle: far = cocked, near = dropped
-  const th=D(l,4,9)/s;
-  if(th>.8)armed=true;
-  else if(armed&&th<.55){armed=false;fire(hist[0].x,hist[0].y)}
+  // thumb moves in the image plane when you point at the camera: tip -> middle knuckle, far = cocked, near = dropped
+  const th=D(l,4,9)/K2;dbg+=' th '+th.toFixed(2);
+  if(th>.7)armed=true;
+  else if(armed&&th<.45){armed=false;fire(hist[0].x,hist[0].y)}
 }
 cv.addEventListener('pointerdown',e=>{
   if(camOK||ph!=='play')return;
@@ -195,7 +201,8 @@ function draw(){
     if(conn){cx.textAlign='right';cx.fillStyle=COL[1];cx.fillText('P2 '+S[1],W-16,y+10)}
     cx.textAlign='center';cx.fillStyle='#e8ecff';cx.fillText(Math.ceil(tleft),W/2,y+10);
     cx.font='14px ui-monospace,monospace';
-    if(camOK){cx.fillStyle=armed?'#7dff7d':hand?'#ffe14d':'#ff6b6b';cx.fillText(armed?'● ARMED':hand?'make a finger gun 👉':'show your hand',W/2,H-40)}
+    if(location.hash==='#debug'){cx.fillStyle='#fff';cx.textAlign='left';cx.fillText(dbg,12,H-14);cx.textAlign='center'}
+    if(camOK){cx.fillStyle=armed?'#7dff7d':hand?'#ffe14d':'#ff6b6b';cx.fillText(armed?'● ARMED':hand?'finger gun at the camera 👉':'show your hand',W/2,H-40)}
     else{cx.fillStyle='#aaa';cx.fillText('tap to shoot',W/2,H-40)}
   }
 }
